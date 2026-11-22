@@ -1,0 +1,49 @@
+# Papermark - production image for Coolify (no official Dockerfile upstream)
+FROM node:24-bookworm-slim AS app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates ffmpeg git \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install deps (postinstall runs `prisma generate`, so the schema must be present)
+COPY package.json package-lock.json ./
+COPY prisma ./prisma
+RUN npm ci --no-audit --no-fund
+
+COPY . .
+
+# Self-hosting fix: upstream middleware treats every host that is not
+# localhost / papermark.com / *.vercel.app as a customer "custom domain".
+# Whitelist our own app host so /login and /dashboard work.
+RUN sed -i 's#host?.includes("localhost") ||#host?.includes("localhost") || host?.split(":")[0] === process.env.NEXT_PUBLIC_APP_BASE_HOST ||#' middleware.ts \
+ && grep -q 'process.env.NEXT_PUBLIC_APP_BASE_HOST ||' middleware.ts
+
+# NEXT_PUBLIC_* values are inlined into the bundle at build time
+ARG NEXT_PUBLIC_BASE_URL
+ARG NEXT_PUBLIC_MARKETING_URL
+ARG NEXT_PUBLIC_APP_BASE_HOST
+ARG NEXT_PUBLIC_UPLOAD_TRANSPORT=s3
+ARG NEXT_PUBLIC_WEBHOOK_BASE_URL
+ARG NEXT_PUBLIC_WEBHOOK_BASE_HOST
+ARG NEXT_PUBLIC_HANKO_TENANT_ID=
+ENV NEXT_PUBLIC_BASE_URL=$NEXT_PUBLIC_BASE_URL \
+    NEXT_PUBLIC_MARKETING_URL=$NEXT_PUBLIC_MARKETING_URL \
+    NEXT_PUBLIC_APP_BASE_HOST=$NEXT_PUBLIC_APP_BASE_HOST \
+    NEXT_PUBLIC_UPLOAD_TRANSPORT=$NEXT_PUBLIC_UPLOAD_TRANSPORT \
+    NEXT_PUBLIC_WEBHOOK_BASE_URL=$NEXT_PUBLIC_WEBHOOK_BASE_URL \
+    NEXT_PUBLIC_WEBHOOK_BASE_HOST=$NEXT_PUBLIC_WEBHOOK_BASE_HOST \
+    NEXT_PUBLIC_HANKO_TENANT_ID=$NEXT_PUBLIC_HANKO_TENANT_ID \
+    NEXT_TELEMETRY_DISABLED=1 \
+    NODE_OPTIONS=--max-old-space-size=6144
+
+RUN npm run build
+
+ENV NODE_ENV=production \
+    NODE_OPTIONS=--max-old-space-size=2048 \
+    PORT=3000
+EXPOSE 3000
+
+# Run DB migrations on every start, then serve
+CMD ["sh", "-c", "npx prisma migrate deploy && npx next start -H 0.0.0.0 -p 3000"]
